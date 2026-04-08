@@ -26,35 +26,11 @@ If you later want exact CPU/GPU telemetry, Hermes itself will need to emit that 
 
 ## Installation
 
-Install with `pipx` if you want an isolated CLI without managing a virtualenv:
-
 ```bash
 pipx install git+https://github.com/jonoringer/hermes-top.git
 ```
 
-On Ubuntu/Debian systems, this is the recommended path because plain `pip install --user` may be blocked by the distro's externally-managed Python rules.
-
-If you explicitly want a user-level install outside `pipx`, use:
-
-```bash
-python3 -m pip install --user --break-system-packages git+https://github.com/jonoringer/hermes-top.git
-```
-
-Install from a local checkout:
-
-```bash
-git clone https://github.com/jonoringer/hermes-top.git
-cd hermes-top
-python3 -m pip install --user .
-```
-
-If your Python user bin directory is not already on `PATH`, add it first:
-
-```bash
-python3 -m site --user-base
-```
-
-The executable will be under that base directory's `bin/`.
+`pipx` gives you an isolated CLI install without needing to manage a virtual environment manually.
 
 ## Usage
 
@@ -100,13 +76,7 @@ source .venv/bin/activate
 python3 -m pip install -e .
 ```
 
-## Running on your Hermes GPU machine
-
-Install directly on the machine where Hermes is actually running:
-
-```bash
-python3 -m pip install --user git+https://github.com/jonoringer/hermes-top.git
-```
+## Running on the Hermes machine
 
 If Hermes uses the default state location, run:
 
