@@ -1,6 +1,6 @@
 # hermes-top
 
-`hermes-top` is a small, top-style CLI for watching Hermes Agent activity from Hermes' own persisted state, alongside machine load and GPU utilization.
+`hermes-top` is a top-style CLI for watching Hermes Agent activity from Hermes' own persisted state, alongside machine load and GPU utilization.
 
 It reads Hermes session metadata from `~/.hermes/state.db` and infers active Hermes-owned work by looking for:
 
