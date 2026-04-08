@@ -434,9 +434,18 @@ def clip(text: str, width: int) -> str:
     return text[: width - 1] + "…"
 
 
-def render_table(db_path: Path, operations: list[Operation], include_idle: bool, limit: int) -> str:
-    active_count = sum(1 for op in operations if op.status != "idle")
-    idle_count = sum(1 for op in operations if op.status == "idle")
+def render_table(
+    db_path: Path,
+    operations: list[Operation],
+    include_idle: bool,
+    limit: int,
+    active_count: int | None = None,
+    idle_count: int | None = None,
+) -> str:
+    if active_count is None:
+        active_count = sum(1 for op in operations if op.status != "idle")
+    if idle_count is None:
+        idle_count = sum(1 for op in operations if op.status == "idle")
     rows = [op for op in operations if include_idle or op.status != "idle"][:limit]
     terminal_width = shutil.get_terminal_size((140, 40)).columns
     cols = [
@@ -494,6 +503,9 @@ def snapshot(db_path: Path, include_idle: bool) -> dict[str, Any]:
         sessions = read_sessions(conn)
         operations = build_operations(sessions, read_messages(conn))
 
+    active_count = sum(1 for op in operations if op.status != "idle")
+    idle_count = sum(1 for op in operations if op.status == "idle")
+
     if not include_idle:
         operations = [op for op in operations if op.status != "idle"]
 
@@ -501,8 +513,8 @@ def snapshot(db_path: Path, include_idle: bool) -> dict[str, Any]:
         "db_path": str(db_path),
         "exists": True,
         "operation_count": len(operations),
-        "active_count": sum(1 for op in operations if op.status != "idle"),
-        "idle_count": sum(1 for op in operations if op.status == "idle"),
+        "active_count": active_count,
+        "idle_count": idle_count,
         "operations": [op.as_dict() for op in operations],
     }
 
@@ -537,7 +549,16 @@ def run_once(args: argparse.Namespace) -> int:
         )
         for item in data["operations"]
     ]
-    print(render_table(db_path, operations, args.include_idle, args.limit))
+    print(
+        render_table(
+            db_path,
+            operations,
+            args.include_idle,
+            args.limit,
+            active_count=data.get("active_count"),
+            idle_count=data.get("idle_count"),
+        )
+    )
     return 0
 
 
@@ -575,7 +596,16 @@ def run_live(args: argparse.Namespace) -> int:
                 )
                 for item in data["operations"]
             ]
-            sys.stdout.write(render_table(db_path, operations, args.include_idle, args.limit))
+            sys.stdout.write(
+                render_table(
+                    db_path,
+                    operations,
+                    args.include_idle,
+                    args.limit,
+                    active_count=data.get("active_count"),
+                    idle_count=data.get("idle_count"),
+                )
+            )
         sys.stdout.write("\n\nPress Ctrl+C to exit.\n")
         sys.stdout.flush()
         time.sleep(max(args.refresh, 0.2))
