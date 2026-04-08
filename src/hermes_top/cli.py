@@ -293,7 +293,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--version", action="version", version=f"%(prog)s {installed_version()}")
     parser.add_argument("--db-path", default=str(default_db_path()), help="Path to Hermes state.db")
     parser.add_argument("--limit", type=int, default=25, help="Maximum rows to display")
-    parser.add_argument("--refresh", type=float, default=2.0, help="Refresh interval in seconds")
+    parser.add_argument("--refresh", type=float, default=0.5, help="Refresh interval in seconds")
     parser.add_argument("--active-now-limit", type=int, default=6, help="Rows to show in the ACTIVE NOW section")
     parser.add_argument("--changes-limit", type=int, default=8, help="Rows to show in the changes section")
     parser.add_argument("--recent-events-limit", type=int, default=6, help="Rows to show in the recent events section")
