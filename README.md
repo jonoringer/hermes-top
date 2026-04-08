@@ -90,7 +90,7 @@ If Hermes stores state somewhere else, point directly at it:
 hermes-top --db-path /path/to/.hermes/state.db
 ```
 
-Useful checks on the GPU box:
+Useful checks on the machine where Hermes is running:
 
 ```bash
 ls -la ~/.hermes
