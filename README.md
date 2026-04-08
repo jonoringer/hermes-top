@@ -46,6 +46,8 @@ One-shot snapshot:
 hermes-top --once
 ```
 
+If there are no active operations but Hermes has open sessions, the empty state now tells you how many idle sessions were found and suggests `--include-idle`.
+
 JSON output:
 
 ```bash

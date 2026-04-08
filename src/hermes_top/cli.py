@@ -435,6 +435,8 @@ def clip(text: str, width: int) -> str:
 
 
 def render_table(db_path: Path, operations: list[Operation], include_idle: bool, limit: int) -> str:
+    active_count = sum(1 for op in operations if op.status != "idle")
+    idle_count = sum(1 for op in operations if op.status == "idle")
     rows = [op for op in operations if include_idle or op.status != "idle"][:limit]
     terminal_width = shutil.get_terminal_size((140, 40)).columns
     cols = [
@@ -451,13 +453,26 @@ def render_table(db_path: Path, operations: list[Operation], include_idle: bool,
     header = " ".join(name.ljust(width) for name, width, _ in cols) + " " + "DETAIL"
     lines = [
         f"hermes-top  db={db_path}",
-        f"rows={len(rows)}  showing={'active+idle' if include_idle else 'active'}",
+        (
+            f"rows={len(rows)}  showing={'active+idle' if include_idle else 'active'}"
+            f"  active={active_count}  idle={idle_count}"
+        ),
         "",
         header,
         "-" * min(len(header) + detail_width + 1, terminal_width),
     ]
     if not rows:
-        lines.append("No active Hermes-owned operations found in the session database.")
+        if idle_count:
+            noun = "session" if idle_count == 1 else "sessions"
+            verb = "is" if idle_count == 1 else "are"
+            lines.append(
+                "No active Hermes-owned operations found in the session database."
+            )
+            lines.append(
+                f"{idle_count} idle {noun} {verb} hidden. Re-run with --include-idle to show them."
+            )
+        else:
+            lines.append("No active Hermes-owned operations found in the session database.")
         return "\n".join(lines)
 
     for op in rows:
@@ -486,6 +501,8 @@ def snapshot(db_path: Path, include_idle: bool) -> dict[str, Any]:
         "db_path": str(db_path),
         "exists": True,
         "operation_count": len(operations),
+        "active_count": sum(1 for op in operations if op.status != "idle"),
+        "idle_count": sum(1 for op in operations if op.status == "idle"),
         "operations": [op.as_dict() for op in operations],
     }
 
