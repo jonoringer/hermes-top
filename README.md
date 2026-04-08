@@ -43,6 +43,7 @@ hermes-top
 ```
 
 By default, the live view shows both active operations and idle open sessions.
+Older idle sessions are hidden by default so the screen behaves more like an activity monitor than an archive.
 
 One-shot snapshot:
 
@@ -54,6 +55,18 @@ Show only active operations:
 
 ```bash
 hermes-top --active-only
+```
+
+Show all sessions, including older idle ones:
+
+```bash
+hermes-top --all-sessions
+```
+
+Tune how long idle sessions stay visible in the default view:
+
+```bash
+hermes-top --max-idle-age 900
 ```
 
 JSON output:
@@ -99,6 +112,7 @@ ls -la ~/.hermes
 find ~ -path "*/.hermes/state.db" 2>/dev/null
 hermes-top --once
 hermes-top --active-only --once
+hermes-top --all-sessions --once
 hermes-top --json
 ```
 

@@ -240,6 +240,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--db-path", default=str(default_db_path()), help="Path to Hermes state.db")
     parser.add_argument("--limit", type=int, default=25, help="Maximum rows to display")
     parser.add_argument("--refresh", type=float, default=2.0, help="Refresh interval in seconds")
+    parser.add_argument(
+        "--max-idle-age",
+        type=float,
+        default=1800.0,
+        help="Hide idle/recent sessions older than this many seconds in the default view (default: 1800)",
+    )
     parser.add_argument("--json", action="store_true", help="Emit a JSON snapshot instead of a live table")
     parser.add_argument("--once", action="store_true", help="Render one snapshot and exit")
     parser.set_defaults(include_idle=True)
@@ -248,6 +254,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         dest="include_idle",
         action="store_false",
         help="Hide idle sessions and only show active Hermes operations",
+    )
+    parser.add_argument(
+        "--all-sessions",
+        action="store_true",
+        help="Show all idle sessions regardless of age",
     )
     parser.add_argument(
         "--include-idle",
@@ -695,6 +706,7 @@ def render_table(
     operations: list[Operation],
     include_idle: bool,
     limit: int,
+    hidden_idle_count: int = 0,
     system: SystemSnapshot | None = None,
     load_history: collections.deque[float | None] | None = None,
     gpu_history: collections.deque[float | None] | None = None,
@@ -767,15 +779,22 @@ def render_table(
         ]
     )
     if not rows:
-        if idle_count:
+        if idle_count or hidden_idle_count:
             noun = "session" if idle_count == 1 else "sessions"
             verb = "is" if idle_count == 1 else "are"
             lines.append(
                 "No active Hermes-owned operations found in the session database."
             )
-            lines.append(
-                f"{idle_count} idle {noun} {verb} hidden. Re-run without --active-only to show them."
-            )
+            if hidden_idle_count:
+                hidden_noun = "session" if hidden_idle_count == 1 else "sessions"
+                hidden_verb = "is" if hidden_idle_count == 1 else "are"
+                lines.append(
+                    f"{hidden_idle_count} older idle {hidden_noun} {hidden_verb} hidden. Re-run with --all-sessions to show them."
+                )
+            elif idle_count and not include_idle:
+                lines.append(
+                    f"{idle_count} idle {noun} {verb} hidden. Re-run without --active-only to show them."
+                )
         else:
             lines.append("No active Hermes-owned operations found in the session database.")
         return "\n".join(lines)
@@ -783,10 +802,16 @@ def render_table(
     for op in rows:
         prefix = " ".join(clip(getter(op), width).ljust(width) for _, width, getter in cols)
         lines.append(prefix + " " + clip(op.detail or "—", detail_width))
+    if hidden_idle_count:
+        hidden_noun = "session" if hidden_idle_count == 1 else "sessions"
+        lines.append("")
+        lines.append(
+            f"{hidden_idle_count} older idle {hidden_noun} hidden. Re-run with --all-sessions to show them."
+        )
     return "\n".join(lines)
 
 
-def snapshot(db_path: Path, include_idle: bool) -> dict[str, Any]:
+def snapshot(db_path: Path, include_idle: bool, all_sessions: bool, max_idle_age: float) -> dict[str, Any]:
     if not db_path.exists():
         return {
             "db_path": str(db_path),
@@ -802,6 +827,16 @@ def snapshot(db_path: Path, include_idle: bool) -> dict[str, Any]:
     active_count = sum(1 for op in operations if op.status not in {"idle", "recent"})
     idle_count = sum(1 for op in operations if op.status in {"idle", "recent"})
 
+    hidden_idle_count = 0
+    if include_idle and not all_sessions:
+        filtered_operations = []
+        for op in operations:
+            if op.status in {"idle", "recent"} and op.duration_seconds > max(max_idle_age, 0.0):
+                hidden_idle_count += 1
+                continue
+            filtered_operations.append(op)
+        operations = filtered_operations
+
     if not include_idle:
         operations = [op for op in operations if op.status not in {"idle", "recent"}]
 
@@ -811,6 +846,7 @@ def snapshot(db_path: Path, include_idle: bool) -> dict[str, Any]:
         "operation_count": len(operations),
         "active_count": active_count,
         "idle_count": idle_count,
+        "hidden_idle_count": hidden_idle_count,
         "system": collect_system_snapshot().as_dict(),
         "operations": [op.as_dict() for op in operations],
     }
@@ -818,7 +854,12 @@ def snapshot(db_path: Path, include_idle: bool) -> dict[str, Any]:
 
 def run_once(args: argparse.Namespace) -> int:
     db_path = Path(args.db_path).expanduser()
-    data = snapshot(db_path, include_idle=args.include_idle)
+    data = snapshot(
+        db_path,
+        include_idle=args.include_idle,
+        all_sessions=args.all_sessions,
+        max_idle_age=args.max_idle_age,
+    )
     if args.json:
         print(json.dumps(data, indent=2))
         return 0
@@ -875,6 +916,7 @@ def run_once(args: argparse.Namespace) -> int:
             operations,
             args.include_idle,
             args.limit,
+            hidden_idle_count=data.get("hidden_idle_count", 0),
             system=system,
             load_history=collections.deque([system.load_percent] if system else [], maxlen=24),
             gpu_history=collections.deque(
@@ -912,7 +954,12 @@ def run_live(args: argparse.Namespace) -> int:
         sys.stdout.flush()
     try:
         while not stop_event.is_set():
-            data = snapshot(db_path, include_idle=args.include_idle)
+            data = snapshot(
+                db_path,
+                include_idle=args.include_idle,
+                all_sessions=args.all_sessions,
+                max_idle_age=args.max_idle_age,
+            )
             sys.stdout.write(ANSI_HOME_AND_CLEAR if use_tty_refresh else ANSI_CLEAR)
             if not data["exists"]:
                 sys.stdout.write(f"hermes-top  db={db_path}\n\n{data['warning']}\n")
@@ -972,6 +1019,7 @@ def run_live(args: argparse.Namespace) -> int:
                         operations,
                         args.include_idle,
                         args.limit,
+                        hidden_idle_count=data.get("hidden_idle_count", 0),
                         system=system,
                         load_history=load_history,
                         gpu_history=gpu_history,
