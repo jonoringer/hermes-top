@@ -1085,6 +1085,7 @@ def run_once(args: argparse.Namespace) -> int:
 
 def run_live(args: argparse.Namespace) -> int:
     stop_event = threading.Event()
+    redraw_event = threading.Event()
     load_history: collections.deque[float | None] = collections.deque(maxlen=24)
     gpu_history: collections.deque[float | None] = collections.deque(maxlen=24)
     previous_seen_events: set[str] = set()
@@ -1093,8 +1094,13 @@ def run_live(args: argparse.Namespace) -> int:
     def handle_signal(_signum: int, _frame: Any) -> None:
         stop_event.set()
 
+    def handle_resize(_signum: int, _frame: Any) -> None:
+        redraw_event.set()
+
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
+    if hasattr(signal, "SIGWINCH"):
+        signal.signal(signal.SIGWINCH, handle_resize)
 
     db_path = Path(args.db_path).expanduser()
     use_tty_refresh = sys.stdout.isatty()
@@ -1207,6 +1213,9 @@ def run_live(args: argparse.Namespace) -> int:
                 )
             sys.stdout.write("\n\nPress Ctrl+C to exit.\n")
             sys.stdout.flush()
+            if redraw_event.is_set():
+                redraw_event.clear()
+                continue
             stop_event.wait(max(args.refresh, 0.2))
     finally:
         if use_tty_refresh:
