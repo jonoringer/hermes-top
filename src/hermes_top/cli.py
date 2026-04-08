@@ -17,8 +17,8 @@ from typing import Any, Iterable
 
 ANSI_CLEAR = "\033[2J\033[H"
 ANSI_HOME_AND_CLEAR = "\033[H\033[J"
-ANSI_ALT_SCREEN_ENTER = "\033[?1049h\033[?25l"
-ANSI_ALT_SCREEN_EXIT = "\033[?25h\033[?1049l"
+ANSI_CURSOR_HIDE = "\033[?25l"
+ANSI_CURSOR_SHOW = "\033[?25h"
 GPU_PATTERN = re.compile(
     r"\b(cuda|cudnn|nvidia|vllm|llama\.cpp|ollama|torch|transformers|triton|mlx)\b",
     re.IGNORECASE,
@@ -480,25 +480,45 @@ def build_operations(sessions: dict[str, SessionInfo], messages: Iterable[sqlite
             continue
         if any(op.session_id == session_id for op in operations):
             continue
-        started = parse_time(session.updated_at) or parse_time(session.started_at) or now
+        latest_activity = (
+            parse_time(session.latest_message_at)
+            or parse_time(session.updated_at)
+            or parse_time(session.started_at)
+            or now
+        )
+        idle_age = max((now - latest_activity).total_seconds(), 0.0)
+        status = "recent" if idle_age <= 30 else "idle"
         operations.append(
             Operation(
                 session_id=session.session_id,
                 session_title=session.title,
                 source=session.source,
-                started_at=started.isoformat(),
-                duration_seconds=max((now - started).total_seconds(), 0.0),
-                status="idle",
+                started_at=latest_activity.isoformat(),
+                duration_seconds=idle_age,
+                status=status,
                 kind="session",
                 tool_name="",
                 label=session.latest_message_role or "session",
-                detail=session.latest_message_preview or "No recent Hermes message detected",
+                detail=(
+                    f"{session.latest_message_preview} [msgs={session.message_count}]"
+                    if session.latest_message_preview
+                    else f"No recent Hermes message detected [msgs={session.message_count}]"
+                ),
                 resource_hint="n/a",
                 call_id=None,
             )
         )
 
-    operations.sort(key=lambda op: (-op.duration_seconds, op.session_id, op.tool_name))
+    def sort_key(op: Operation) -> tuple[int, float, str, str]:
+        if op.status == "running":
+            return (0, -op.duration_seconds, op.session_id, op.tool_name)
+        if op.status == "recent":
+            return (1, op.duration_seconds, op.session_id, op.tool_name)
+        if op.status == "idle":
+            return (2, op.duration_seconds, op.session_id, op.tool_name)
+        return (0, -op.duration_seconds, op.session_id, op.tool_name)
+
+    operations.sort(key=sort_key)
     return operations
 
 
@@ -530,10 +550,10 @@ def render_table(
     idle_count: int | None = None,
 ) -> str:
     if active_count is None:
-        active_count = sum(1 for op in operations if op.status != "idle")
+        active_count = sum(1 for op in operations if op.status not in {"idle", "recent"})
     if idle_count is None:
-        idle_count = sum(1 for op in operations if op.status == "idle")
-    rows = [op for op in operations if include_idle or op.status != "idle"][:limit]
+        idle_count = sum(1 for op in operations if op.status in {"idle", "recent"})
+    rows = [op for op in operations if include_idle or op.status not in {"idle", "recent"}][:limit]
     terminal_width = shutil.get_terminal_size((140, 40)).columns
     cols = [
         ("STATUS", 9, lambda op: op.status),
@@ -590,11 +610,11 @@ def snapshot(db_path: Path, include_idle: bool) -> dict[str, Any]:
         sessions = read_sessions(conn)
         operations = build_operations(sessions, read_messages(conn))
 
-    active_count = sum(1 for op in operations if op.status != "idle")
-    idle_count = sum(1 for op in operations if op.status == "idle")
+    active_count = sum(1 for op in operations if op.status not in {"idle", "recent"})
+    idle_count = sum(1 for op in operations if op.status in {"idle", "recent"})
 
     if not include_idle:
-        operations = [op for op in operations if op.status != "idle"]
+        operations = [op for op in operations if op.status not in {"idle", "recent"}]
 
     return {
         "db_path": str(db_path),
@@ -659,14 +679,14 @@ def run_live(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGTERM, handle_signal)
 
     db_path = Path(args.db_path).expanduser()
-    use_alt_screen = sys.stdout.isatty()
-    if use_alt_screen:
-        sys.stdout.write(ANSI_ALT_SCREEN_ENTER)
+    use_tty_refresh = sys.stdout.isatty()
+    if use_tty_refresh:
+        sys.stdout.write(ANSI_CURSOR_HIDE)
         sys.stdout.flush()
     try:
         while not stop_event.is_set():
             data = snapshot(db_path, include_idle=args.include_idle)
-            sys.stdout.write(ANSI_HOME_AND_CLEAR if use_alt_screen else ANSI_CLEAR)
+            sys.stdout.write(ANSI_HOME_AND_CLEAR if use_tty_refresh else ANSI_CLEAR)
             if not data["exists"]:
                 sys.stdout.write(f"hermes-top  db={db_path}\n\n{data['warning']}\n")
             else:
@@ -701,8 +721,9 @@ def run_live(args: argparse.Namespace) -> int:
             sys.stdout.flush()
             stop_event.wait(max(args.refresh, 0.2))
     finally:
-        if use_alt_screen:
-            sys.stdout.write(ANSI_ALT_SCREEN_EXIT)
+        if use_tty_refresh:
+            sys.stdout.write("\n")
+            sys.stdout.write(ANSI_CURSOR_SHOW)
             sys.stdout.flush()
     return 0
 
