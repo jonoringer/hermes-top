@@ -69,6 +69,12 @@ Tune how long idle sessions stay visible in the default view:
 hermes-top --max-idle-age 900
 ```
 
+Tune how fresh activity must be to appear in the `ACTIVE NOW` pane:
+
+```bash
+hermes-top --recent-window 120
+```
+
 JSON output:
 
 ```bash
@@ -136,6 +142,8 @@ hermes-top --json
 ## Recent events
 
 - `recent events`: a compact feed of the latest Hermes messages across sessions so new activity is visible even before the session table meaningfully reorders
+- `active now`: only the events inside the recent activity window, intended to feel like a live pulse
+- `changes`: newly observed Hermes events since the last refresh, so the screen shows what changed frame-to-frame
 
 ## Next step for deeper integration
 

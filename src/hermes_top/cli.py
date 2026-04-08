@@ -124,6 +124,7 @@ class SystemSnapshot:
 
 @dataclass
 class RecentEvent:
+    message_key: str
     age_seconds: float
     source: str
     session_title: str
@@ -132,6 +133,7 @@ class RecentEvent:
 
     def as_dict(self) -> dict[str, Any]:
         return {
+            "message_key": self.message_key,
             "age_seconds": round(self.age_seconds, 3),
             "source": self.source,
             "session_title": self.session_title,
@@ -258,6 +260,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--db-path", default=str(default_db_path()), help="Path to Hermes state.db")
     parser.add_argument("--limit", type=int, default=25, help="Maximum rows to display")
     parser.add_argument("--refresh", type=float, default=2.0, help="Refresh interval in seconds")
+    parser.add_argument(
+        "--recent-window",
+        type=float,
+        default=60.0,
+        help="Show sessions/events active within this many seconds in the ACTIVE NOW view (default: 60)",
+    )
     parser.add_argument(
         "--max-idle-age",
         type=float,
@@ -535,7 +543,7 @@ def describe_message(row: sqlite3.Row) -> str:
 def build_recent_events(
     sessions: dict[str, SessionInfo],
     messages: Iterable[sqlite3.Row],
-    limit: int = 6,
+    limit: int = 20,
 ) -> list[RecentEvent]:
     now = datetime.now(timezone.utc)
     events: list[RecentEvent] = []
@@ -548,6 +556,7 @@ def build_recent_events(
             continue
         events.append(
             RecentEvent(
+                message_key=f"{row['message_id']}",
                 age_seconds=max((now - created_at).total_seconds(), 0.0),
                 source=session.source,
                 session_title=session.title,
@@ -557,6 +566,17 @@ def build_recent_events(
         )
     events.sort(key=lambda event: event.age_seconds)
     return events[:limit]
+
+
+def build_change_feed(
+    recent_events: list[RecentEvent],
+    previous_seen: set[str],
+    limit: int = 8,
+) -> tuple[list[RecentEvent], set[str]]:
+    current_seen = {event.message_key for event in recent_events}
+    changes = [event for event in recent_events if event.message_key not in previous_seen]
+    changes.sort(key=lambda event: event.age_seconds)
+    return changes[:limit], current_seen
 
 
 def classify_tool(tool_name: str, detail: str) -> tuple[str, str]:
@@ -752,6 +772,8 @@ def render_table(
     include_idle: bool,
     limit: int,
     hidden_idle_count: int = 0,
+    active_now: list[RecentEvent] | None = None,
+    change_feed: list[RecentEvent] | None = None,
     recent_events: list[RecentEvent] | None = None,
     system: SystemSnapshot | None = None,
     load_history: collections.deque[float | None] | None = None,
@@ -817,6 +839,22 @@ def render_table(
             lines.append(f"gpu load   unavailable ({summarize_text(system.gpu_query_error, limit=60)})")
         else:
             lines.append("gpu load   no NVIDIA GPUs detected")
+        lines.append("")
+    if active_now:
+        lines.append(f"active now ({len(active_now)})")
+        for event in active_now[:6]:
+            age = human_duration(event.age_seconds)
+            lines.append(
+                f"  {age:>8}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 42))}"
+            )
+        lines.append("")
+    if change_feed:
+        lines.append("changes")
+        for event in change_feed[:8]:
+            age = human_duration(event.age_seconds)
+            lines.append(
+                f"  + {age:>6}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 44))}"
+            )
         lines.append("")
     if recent_events:
         lines.append("recent events")
@@ -947,6 +985,7 @@ def run_once(args: argparse.Namespace) -> int:
     system = None
     recent_events = [
         RecentEvent(
+            message_key=item.get("message_key", ""),
             age_seconds=item.get("age_seconds", 0.0),
             source=item.get("source", "unknown"),
             session_title=item.get("session_title", "—"),
@@ -956,6 +995,7 @@ def run_once(args: argparse.Namespace) -> int:
         for item in data.get("recent_events", [])
         if isinstance(item, dict)
     ]
+    active_now = [event for event in recent_events if event.age_seconds <= max(args.recent_window, 0.0)]
     if isinstance(data.get("system"), dict):
         system_dict = data["system"]
         system = SystemSnapshot(
@@ -985,6 +1025,7 @@ def run_once(args: argparse.Namespace) -> int:
             args.include_idle,
             args.limit,
             hidden_idle_count=data.get("hidden_idle_count", 0),
+            active_now=active_now,
             recent_events=recent_events,
             system=system,
             load_history=collections.deque([system.load_percent] if system else [], maxlen=24),
@@ -1009,6 +1050,7 @@ def run_live(args: argparse.Namespace) -> int:
     stop_event = threading.Event()
     load_history: collections.deque[float | None] = collections.deque(maxlen=24)
     gpu_history: collections.deque[float | None] = collections.deque(maxlen=24)
+    previous_seen_events: set[str] = set()
 
     def handle_signal(_signum: int, _frame: Any) -> None:
         stop_event.set()
@@ -1084,6 +1126,7 @@ def run_live(args: argparse.Namespace) -> int:
                 ]
                 recent_events = [
                     RecentEvent(
+                        message_key=item.get("message_key", ""),
                         age_seconds=item.get("age_seconds", 0.0),
                         source=item.get("source", "unknown"),
                         session_title=item.get("session_title", "—"),
@@ -1093,6 +1136,8 @@ def run_live(args: argparse.Namespace) -> int:
                     for item in data.get("recent_events", [])
                     if isinstance(item, dict)
                 ]
+                active_now = [event for event in recent_events if event.age_seconds <= max(args.recent_window, 0.0)]
+                change_feed, previous_seen_events = build_change_feed(recent_events, previous_seen_events)
                 sys.stdout.write(
                     render_table(
                         db_path,
@@ -1100,6 +1145,8 @@ def run_live(args: argparse.Namespace) -> int:
                         args.include_idle,
                         args.limit,
                         hidden_idle_count=data.get("hidden_idle_count", 0),
+                        active_now=active_now,
+                        change_feed=change_feed,
                         recent_events=recent_events,
                         system=system,
                         load_history=load_history,
