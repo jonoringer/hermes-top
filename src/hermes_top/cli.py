@@ -8,7 +8,7 @@ import shutil
 import signal
 import sqlite3
 import sys
-import time
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +16,9 @@ from typing import Any, Iterable
 
 
 ANSI_CLEAR = "\033[2J\033[H"
+ANSI_HOME_AND_CLEAR = "\033[H\033[J"
+ANSI_ALT_SCREEN_ENTER = "\033[?1049h\033[?25l"
+ANSI_ALT_SCREEN_EXIT = "\033[?25h\033[?1049l"
 GPU_PATTERN = re.compile(
     r"\b(cuda|cudnn|nvidia|vllm|llama\.cpp|ollama|torch|transformers|triton|mlx)\b",
     re.IGNORECASE,
@@ -35,6 +38,10 @@ class SessionInfo:
     started_at: str | None
     ended_at: str | None
     updated_at: str | None
+    message_count: int = 0
+    latest_message_at: str | None = None
+    latest_message_role: str | None = None
+    latest_message_preview: str = ""
 
 
 @dataclass
@@ -86,10 +93,18 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--refresh", type=float, default=2.0, help="Refresh interval in seconds")
     parser.add_argument("--json", action="store_true", help="Emit a JSON snapshot instead of a live table")
     parser.add_argument("--once", action="store_true", help="Render one snapshot and exit")
+    parser.set_defaults(include_idle=True)
+    parser.add_argument(
+        "--active-only",
+        dest="include_idle",
+        action="store_false",
+        help="Hide idle sessions and only show active Hermes operations",
+    )
     parser.add_argument(
         "--include-idle",
+        dest="include_idle",
         action="store_true",
-        help="Also show active sessions without an in-flight Hermes operation",
+        help=argparse.SUPPRESS,
     )
     return parser.parse_args(argv)
 
@@ -134,9 +149,12 @@ def read_sessions(conn: sqlite3.Connection) -> dict[str, SessionInfo]:
     sessions: dict[str, SessionInfo] = {}
     for row in conn.execute(query):
         session_id = str(row["session_id"])
+        title = (row["title"] or "").strip() if isinstance(row["title"], str) else (row["title"] or "")
+        if not title:
+            title = session_id[:12]
         sessions[session_id] = SessionInfo(
             session_id=session_id,
-            title=(row["title"] or "—"),
+            title=title,
             source=(row["source"] or "unknown"),
             started_at=row["started_at"],
             ended_at=row["ended_at"],
@@ -233,6 +251,52 @@ def summarize_text(value: Any, limit: int = 52) -> str:
     return text[: limit - 1] + "…"
 
 
+def summarize_message_content(value: Any, limit: int = 80) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        stripped = value.strip()
+        parsed = safe_json_loads(stripped)
+        if parsed is not None:
+            return summarize_message_content(parsed, limit=limit)
+        return summarize_text(stripped, limit=limit)
+    if isinstance(value, dict):
+        for key in ("text", "content", "message", "detail", "summary", "result"):
+            if key in value and value[key] not in (None, ""):
+                return summarize_message_content(value[key], limit=limit)
+        return summarize_text(value, limit=limit)
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, dict):
+                if item.get("type") == "text" and item.get("text"):
+                    parts.append(str(item["text"]))
+                    continue
+                if item.get("type") in {"input_text", "output_text"} and item.get("text"):
+                    parts.append(str(item["text"]))
+                    continue
+                if item.get("type") == "tool_result" and item.get("content"):
+                    parts.append(summarize_message_content(item["content"], limit=limit))
+                    continue
+                if item.get("tool_calls"):
+                    names = []
+                    for call in item["tool_calls"]:
+                        if not isinstance(call, dict):
+                            continue
+                        fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                        names.append(str(fn.get("name") or call.get("name") or "tool"))
+                    if names:
+                        parts.append("tool calls: " + ", ".join(names))
+                        continue
+            elif item not in (None, ""):
+                parts.append(str(item))
+            if " ".join(parts):
+                break
+        if parts:
+            return summarize_text(" ".join(part for part in parts if part), limit=limit)
+    return summarize_text(value, limit=limit)
+
+
 def stringify_args(arguments: Any) -> str:
     if arguments is None:
         return ""
@@ -269,6 +333,25 @@ def extract_tool_calls(row: sqlite3.Row) -> list[dict[str, Any]]:
         if calls:
             return calls
     return []
+
+
+def describe_message(row: sqlite3.Row) -> str:
+    role = str(row["role"] or "message")
+    if role == "assistant":
+        tool_calls = extract_tool_calls(row)
+        if tool_calls:
+            names = []
+            for call in tool_calls[:3]:
+                fn = call.get("function") if isinstance(call.get("function"), dict) else {}
+                names.append(str(fn.get("name") or call.get("name") or "tool"))
+            suffix = " ..." if len(tool_calls) > 3 else ""
+            return f"assistant called {', '.join(names)}{suffix}"
+    if role == "tool":
+        tool_name = str(row["tool_name"] or "tool")
+        detail = summarize_message_content(row["content"], limit=72)
+        return f"{tool_name}: {detail}" if detail else f"{tool_name} result"
+    detail = summarize_message_content(row["content"], limit=72)
+    return f"{role}: {detail}" if detail else role
 
 
 def classify_tool(tool_name: str, detail: str) -> tuple[str, str]:
@@ -324,6 +407,10 @@ def build_operations(sessions: dict[str, SessionInfo], messages: Iterable[sqlite
             continue
         active_sessions.add(session.session_id)
         created_at = parse_time(row["created_at"]) or parse_time(session.started_at) or now
+        session.message_count += 1
+        session.latest_message_at = created_at.isoformat()
+        session.latest_message_role = str(row["role"] or "")
+        session.latest_message_preview = describe_message(row)
 
         if row["role"] == "assistant":
             for call in extract_tool_calls(row):
@@ -404,8 +491,8 @@ def build_operations(sessions: dict[str, SessionInfo], messages: Iterable[sqlite
                 status="idle",
                 kind="session",
                 tool_name="",
-                label="session open",
-                detail="No in-flight Hermes tool call detected",
+                label=session.latest_message_role or "session",
+                detail=session.latest_message_preview or "No recent Hermes message detected",
                 resource_hint="n/a",
                 call_id=None,
             )
@@ -463,7 +550,7 @@ def render_table(
     lines = [
         f"hermes-top  db={db_path}",
         (
-            f"rows={len(rows)}  showing={'active+idle' if include_idle else 'active'}"
+            f"rows={len(rows)}  showing={'active+idle' if include_idle else 'active-only'}"
             f"  active={active_count}  idle={idle_count}"
         ),
         "",
@@ -478,7 +565,7 @@ def render_table(
                 "No active Hermes-owned operations found in the session database."
             )
             lines.append(
-                f"{idle_count} idle {noun} {verb} hidden. Re-run with --include-idle to show them."
+                f"{idle_count} idle {noun} {verb} hidden. Re-run without --active-only to show them."
             )
         else:
             lines.append("No active Hermes-owned operations found in the session database.")
@@ -563,52 +650,60 @@ def run_once(args: argparse.Namespace) -> int:
 
 
 def run_live(args: argparse.Namespace) -> int:
-    stop = False
+    stop_event = threading.Event()
 
     def handle_signal(_signum: int, _frame: Any) -> None:
-        nonlocal stop
-        stop = True
+        stop_event.set()
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
     db_path = Path(args.db_path).expanduser()
-    while not stop:
-        data = snapshot(db_path, include_idle=args.include_idle)
-        sys.stdout.write(ANSI_CLEAR)
-        if not data["exists"]:
-            sys.stdout.write(f"hermes-top  db={db_path}\n\n{data['warning']}\n")
-        else:
-            operations = [
-                Operation(
-                    session_id=item["session_id"],
-                    session_title=item["session_title"],
-                    source=item["source"],
-                    started_at=item["started_at"],
-                    duration_seconds=item["duration_seconds"],
-                    status=item["status"],
-                    kind=item["kind"],
-                    tool_name=item["tool_name"],
-                    label=item["label"],
-                    detail=item["detail"],
-                    resource_hint=item["resource_hint"],
-                    call_id=item["call_id"],
-                )
-                for item in data["operations"]
-            ]
-            sys.stdout.write(
-                render_table(
-                    db_path,
-                    operations,
-                    args.include_idle,
-                    args.limit,
-                    active_count=data.get("active_count"),
-                    idle_count=data.get("idle_count"),
-                )
-            )
-        sys.stdout.write("\n\nPress Ctrl+C to exit.\n")
+    use_alt_screen = sys.stdout.isatty()
+    if use_alt_screen:
+        sys.stdout.write(ANSI_ALT_SCREEN_ENTER)
         sys.stdout.flush()
-        time.sleep(max(args.refresh, 0.2))
+    try:
+        while not stop_event.is_set():
+            data = snapshot(db_path, include_idle=args.include_idle)
+            sys.stdout.write(ANSI_HOME_AND_CLEAR if use_alt_screen else ANSI_CLEAR)
+            if not data["exists"]:
+                sys.stdout.write(f"hermes-top  db={db_path}\n\n{data['warning']}\n")
+            else:
+                operations = [
+                    Operation(
+                        session_id=item["session_id"],
+                        session_title=item["session_title"],
+                        source=item["source"],
+                        started_at=item["started_at"],
+                        duration_seconds=item["duration_seconds"],
+                        status=item["status"],
+                        kind=item["kind"],
+                        tool_name=item["tool_name"],
+                        label=item["label"],
+                        detail=item["detail"],
+                        resource_hint=item["resource_hint"],
+                        call_id=item["call_id"],
+                    )
+                    for item in data["operations"]
+                ]
+                sys.stdout.write(
+                    render_table(
+                        db_path,
+                        operations,
+                        args.include_idle,
+                        args.limit,
+                        active_count=data.get("active_count"),
+                        idle_count=data.get("idle_count"),
+                    )
+                )
+            sys.stdout.write("\n\nPress Ctrl+C to exit.\n")
+            sys.stdout.flush()
+            stop_event.wait(max(args.refresh, 0.2))
+    finally:
+        if use_alt_screen:
+            sys.stdout.write(ANSI_ALT_SCREEN_EXIT)
+            sys.stdout.flush()
     return 0
 
 

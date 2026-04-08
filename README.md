@@ -40,24 +40,24 @@ Run the live table:
 hermes-top
 ```
 
+By default, the live view shows both active operations and idle open sessions.
+
 One-shot snapshot:
 
 ```bash
 hermes-top --once
 ```
 
-If there are no active operations but Hermes has open sessions, the empty state tells you how many idle sessions were found and suggests `--include-idle`.
+Show only active operations:
+
+```bash
+hermes-top --active-only
+```
 
 JSON output:
 
 ```bash
 hermes-top --json
-```
-
-Include idle open sessions:
-
-```bash
-hermes-top --include-idle
 ```
 
 Use a non-default Hermes database:
@@ -96,7 +96,7 @@ Useful checks on the machine where Hermes is running:
 ls -la ~/.hermes
 find ~ -path "*/.hermes/state.db" 2>/dev/null
 hermes-top --once
-hermes-top --include-idle --once
+hermes-top --active-only --once
 hermes-top --json
 ```
 
