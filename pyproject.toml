@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Top-style CLI for monitoring Hermes Agent activity from Hermes state"
 readme = "README.md"
 requires-python = ">=3.9"
+license = "Unlicense"
 authors = [
   { name = "Jon Oringer" }
 ]
@@ -17,6 +18,7 @@ classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
+  "License :: Public Domain",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.9",
