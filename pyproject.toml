@@ -5,13 +5,32 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hermes-top"
 version = "0.1.0"
-description = "Top-style monitor for Hermes Agent activity"
+description = "Top-style CLI for monitoring Hermes Agent activity from Hermes state"
 readme = "README.md"
 requires-python = ">=3.9"
 authors = [
-  { name = "OpenAI Codex" }
+  { name = "Jon Oringer" }
 ]
 dependencies = []
+keywords = ["hermes", "cli", "monitoring", "sqlite", "terminal"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Monitoring",
+  "Topic :: Utilities",
+]
+
+[project.urls]
+Homepage = "https://github.com/jonoringer/hermes-top"
+Repository = "https://github.com/jonoringer/hermes-top"
+Issues = "https://github.com/jonoringer/hermes-top/issues"
 
 [project.scripts]
 hermes-top = "hermes_top.cli:main"

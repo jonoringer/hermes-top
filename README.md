@@ -24,15 +24,37 @@ Because it is reading Hermes state rather than sampling kernel metrics, the `res
 
 If you later want exact CPU/GPU telemetry, Hermes itself will need to emit that into its own state or expose a dedicated runtime endpoint. This first version is designed to be a safe Hermes-only monitor.
 
-## Local development
+## Installation
 
-From this folder:
+Install with `pipx` if you want an isolated CLI without managing a virtualenv:
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python3 -m pip install -e .
+pipx install git+https://github.com/jonoringer/hermes-top.git
 ```
+
+Install for your user without a virtualenv:
+
+```bash
+python3 -m pip install --user git+https://github.com/jonoringer/hermes-top.git
+```
+
+Install from a local checkout:
+
+```bash
+git clone https://github.com/jonoringer/hermes-top.git
+cd hermes-top
+python3 -m pip install --user .
+```
+
+If your Python user bin directory is not already on `PATH`, add it first:
+
+```bash
+python3 -m site --user-base
+```
+
+The executable will be under that base directory's `bin/`.
+
+## Usage
 
 Run the live table:
 
@@ -46,7 +68,7 @@ One-shot snapshot:
 hermes-top --once
 ```
 
-If there are no active operations but Hermes has open sessions, the empty state now tells you how many idle sessions were found and suggests `--include-idle`.
+If there are no active operations but Hermes has open sessions, the empty state tells you how many idle sessions were found and suggests `--include-idle`.
 
 JSON output:
 
@@ -66,16 +88,22 @@ Use a non-default Hermes database:
 hermes-top --db-path /path/to/state.db
 ```
 
-## Running on your Hermes GPU machine
+## Development
 
-Clone the repo on the machine where Hermes is actually running:
+From this folder:
 
 ```bash
-git clone <REPO_URL>
-cd hermes-top
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -e .
+```
+
+## Running on your Hermes GPU machine
+
+Install directly on the machine where Hermes is actually running:
+
+```bash
+python3 -m pip install --user git+https://github.com/jonoringer/hermes-top.git
 ```
 
 If Hermes uses the default state location, run:
@@ -96,6 +124,7 @@ Useful checks on the GPU box:
 ls -la ~/.hermes
 find ~ -path "*/.hermes/state.db" 2>/dev/null
 hermes-top --once
+hermes-top --include-idle --once
 hermes-top --json
 ```
 
