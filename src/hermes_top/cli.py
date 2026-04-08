@@ -22,6 +22,14 @@ ANSI_CLEAR = "\033[2J\033[H"
 ANSI_HOME_AND_CLEAR = "\033[H\033[J"
 ANSI_CURSOR_HIDE = "\033[?25l"
 ANSI_CURSOR_SHOW = "\033[?25h"
+ANSI_RESET = "\033[0m"
+ANSI_BOLD = "\033[1m"
+ANSI_DIM = "\033[2m"
+ANSI_CYAN = "\033[36m"
+ANSI_GREEN = "\033[32m"
+ANSI_YELLOW = "\033[33m"
+ANSI_RED = "\033[31m"
+ANSI_MAGENTA = "\033[35m"
 GPU_PATTERN = re.compile(
     r"\b(cuda|cudnn|nvidia|vllm|llama\.cpp|ollama|torch|transformers|triton|mlx)\b",
     re.IGNORECASE,
@@ -31,7 +39,7 @@ CPU_PATTERN = re.compile(
     re.IGNORECASE,
 )
 WEB_PATTERN = re.compile(r"\b(http|https|url|fetch|request|response|api)\b", re.IGNORECASE)
-SPARK_CHARS = " .:-=+*#%@"
+SPARK_CHARS = " ▁▂▃▄▅▆▇█"
 
 
 @dataclass
@@ -249,6 +257,32 @@ def format_load(value: float | None) -> str:
     if value is None:
         return "n/a"
     return f"{value:.2f}"
+
+
+def colorize(text: str, color: str, enabled: bool, *, bold: bool = False, dim: bool = False) -> str:
+    if not enabled:
+        return text
+    prefix = ""
+    if bold:
+        prefix += ANSI_BOLD
+    if dim:
+        prefix += ANSI_DIM
+    prefix += color
+    return f"{prefix}{text}{ANSI_RESET}"
+
+
+def section_box(title: str, body_lines: list[str], width: int, color: str, color_enabled: bool) -> list[str]:
+    inner_width = max(width - 4, 20)
+    top = f"+- {title[: max(inner_width - 1, 1)]}".ljust(inner_width + 3, "-") + "+"
+    bottom = "+" + "-" * (inner_width + 2) + "+"
+    lines = [colorize(top, color, color_enabled, bold=True)]
+    if not body_lines:
+        body_lines = [""]
+    for line in body_lines:
+        clipped = clip(line, inner_width)
+        lines.append(colorize(f"| {clipped.ljust(inner_width)} |", color, color_enabled))
+    lines.append(colorize(bottom, color, color_enabled))
+    return lines
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -796,7 +830,8 @@ def render_table(
     recent_events: list[RecentEvent] | None = None,
     system: SystemSnapshot | None = None,
     load_history: collections.deque[float | None] | None = None,
-    gpu_history: collections.deque[float | None] | None = None,
+    gpu_history: dict[int, collections.deque[float | None]] | None = None,
+    gpu_memory_history: dict[int, collections.deque[float | None]] | None = None,
     active_count: int | None = None,
     idle_count: int | None = None,
 ) -> str:
@@ -806,6 +841,7 @@ def render_table(
         idle_count = sum(1 for op in operations if op.status in {"idle", "recent"})
     rows = [op for op in operations if include_idle or op.status not in {"idle", "recent"}][:limit]
     terminal_width = shutil.get_terminal_size((140, 40)).columns
+    color_enabled = sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb"
     cols = [
         ("STATUS", 9, lambda op: op.status),
         ("KIND", 8, lambda op: op.kind),
@@ -819,7 +855,7 @@ def render_table(
     detail_width = max(24, terminal_width - used - 1)
     header = " ".join(name.ljust(width) for name, width, _ in cols) + " " + "DETAIL"
     lines = [
-        f"hermes-top  db={db_path}",
+        colorize(f"hermes-top  db={db_path}", ANSI_CYAN, color_enabled, bold=True),
         (
             f"rows={len(rows)}  showing={'active+idle' if include_idle else 'active-only'}"
             f"  active={active_count}  idle={idle_count}"
@@ -827,74 +863,90 @@ def render_table(
         "",
     ]
     if show_system and system is not None:
+        system_lines = []
         load_line = (
-            "host load  "
-            f"1m={format_load(system.load_1m)}  "
+            f"host  1m={format_load(system.load_1m)}  "
             f"5m={format_load(system.load_5m)}  "
             f"15m={format_load(system.load_15m)}  "
             f"cpu-load={format_percent(system.load_percent)}"
         )
         if system.cpu_count:
             load_line += f"  cores={system.cpu_count}"
-        lines.append(load_line)
+        system_lines.append(load_line)
         if load_history is not None:
-            lines.append(f"load hist  {build_sparkline(load_history, width=24)}")
+            system_lines.append(f"load hist  {build_sparkline(load_history, width=30)}")
         if system.gpu_stats:
             avg_gpu = sum(gpu.utilization_gpu for gpu in system.gpu_stats) / len(system.gpu_stats)
-            lines.append(
-                f"gpu load   avg={format_percent(avg_gpu)}  count={len(system.gpu_stats)}"
+            system_lines.append(
+                f"gpu   avg={format_percent(avg_gpu)}  count={len(system.gpu_stats)}"
             )
-            if gpu_history is not None:
-                lines.append(f"gpu hist   {build_sparkline(gpu_history, width=24)}")
             for gpu in system.gpu_stats:
                 mem = ""
                 if gpu.memory_used_mb is not None and gpu.memory_total_mb is not None:
                     mem = f" mem={gpu.memory_used_mb:.0f}/{gpu.memory_total_mb:.0f}MiB"
                 temp = f" temp={gpu.temperature_c:.0f}C" if gpu.temperature_c is not None else ""
-                lines.append(
-                    f"gpu{gpu.index:<2} {clip(gpu.name, 24):<24} util={format_percent(gpu.utilization_gpu):>4}{mem}{temp}"
+                util_hist = build_sparkline((gpu_history or {}).get(gpu.index, collections.deque()), width=18)
+                mem_hist = build_sparkline((gpu_memory_history or {}).get(gpu.index, collections.deque()), width=18)
+                system_lines.append(
+                    f"gpu{gpu.index:<2} {clip(gpu.name, 18):<18} util={format_percent(gpu.utilization_gpu):>4}{mem}{temp}"
                 )
+                system_lines.append(f"      util hist {util_hist}")
+                if gpu.memory_total_mb is not None:
+                    system_lines.append(f"      mem  hist {mem_hist}")
         elif system.gpu_query_error:
-            lines.append(f"gpu load   unavailable ({summarize_text(system.gpu_query_error, limit=60)})")
+            system_lines.append(f"gpu   unavailable ({summarize_text(system.gpu_query_error, limit=60)})")
         else:
-            lines.append("gpu load   no NVIDIA GPUs detected")
+            system_lines.append("gpu   no NVIDIA GPUs detected")
+        lines.extend(section_box("SYSTEM", system_lines, terminal_width, ANSI_CYAN, color_enabled))
         lines.append("")
     if show_active_now and active_now:
-        lines.append(f"active now ({min(len(active_now), max(active_now_limit, 0))})")
+        event_lines = []
         for event in active_now[: max(active_now_limit, 0)]:
             age = human_duration(event.age_seconds)
-            lines.append(
-                f"  {age:>8}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 42))}"
+            event_lines.append(
+                f"{age:>8}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 46))}"
             )
+        lines.extend(
+            section_box(
+                f"ACTIVE NOW ({min(len(active_now), max(active_now_limit, 0))})",
+                event_lines,
+                terminal_width,
+                ANSI_GREEN,
+                color_enabled,
+            )
+        )
         lines.append("")
     if show_changes and change_feed:
-        lines.append("changes")
+        change_lines = []
         for event in change_feed[: max(changes_limit, 0)]:
             age = human_duration(event.age_seconds)
-            lines.append(
-                f"  + {age:>6}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 44))}"
+            change_lines.append(
+                f"+ {age:>6}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 48))}"
             )
+        lines.extend(section_box("CHANGES", change_lines, terminal_width, ANSI_YELLOW, color_enabled))
         lines.append("")
     if show_history and history_events:
-        lines.append("history")
+        history_lines = []
         for event in history_events[: max(history_limit, 0)]:
             age = human_duration(event.age_seconds)
-            lines.append(
-                f"  {age:>8}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 42))}"
+            history_lines.append(
+                f"{age:>8}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 46))}"
             )
+        lines.extend(section_box("HISTORY", history_lines, terminal_width, ANSI_MAGENTA, color_enabled))
         lines.append("")
     if show_recent_events and recent_events:
-        lines.append("recent events")
+        recent_lines = []
         for event in recent_events[: max(recent_events_limit, 0)]:
             age = human_duration(event.age_seconds)
-            lines.append(
-                f"  {age:>8}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 42))}"
+            recent_lines.append(
+                f"{age:>8}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 46))}"
             )
+        lines.extend(section_box("RECENT EVENTS", recent_lines, terminal_width, ANSI_DIM, color_enabled))
         lines.append("")
     lines.extend(
         [
-            header,
-            "-" * min(len(header) + detail_width + 1, terminal_width),
+            colorize(header, ANSI_CYAN, color_enabled, bold=True),
+            colorize("-" * min(len(header) + detail_width + 1, terminal_width), ANSI_CYAN, color_enabled),
         ]
     )
     if not rows:
@@ -920,7 +972,12 @@ def render_table(
 
     for op in rows:
         prefix = " ".join(clip(getter(op), width).ljust(width) for _, width, getter in cols)
-        lines.append(prefix + " " + clip(op.detail or "—", detail_width))
+        status_color = {
+            "running": ANSI_GREEN,
+            "recent": ANSI_YELLOW,
+            "idle": ANSI_DIM,
+        }.get(op.status, ANSI_CYAN)
+        lines.append(colorize(prefix + " " + clip(op.detail or "—", detail_width), status_color, color_enabled))
     if hidden_idle_count:
         hidden_noun = "session" if hidden_idle_count == 1 else "sessions"
         lines.append("")
@@ -1066,16 +1123,23 @@ def run_once(args: argparse.Namespace) -> int:
             recent_events=recent_events,
             system=system,
             load_history=collections.deque([system.load_percent] if system else [], maxlen=24),
-            gpu_history=collections.deque(
-                [
-                    (
-                        sum(gpu.utilization_gpu for gpu in system.gpu_stats) / len(system.gpu_stats)
-                        if system and system.gpu_stats
-                        else None
-                    )
-                ],
-                maxlen=24,
-            ),
+            gpu_history={
+                gpu.index: collections.deque([gpu.utilization_gpu], maxlen=24)
+                for gpu in (system.gpu_stats if system else [])
+            },
+            gpu_memory_history={
+                gpu.index: collections.deque(
+                    [
+                        (
+                            ((gpu.memory_used_mb or 0.0) / gpu.memory_total_mb) * 100.0
+                            if gpu.memory_total_mb
+                            else None
+                        )
+                    ],
+                    maxlen=24,
+                )
+                for gpu in (system.gpu_stats if system else [])
+            },
             active_count=data.get("active_count"),
             idle_count=data.get("idle_count"),
         )
@@ -1087,7 +1151,8 @@ def run_live(args: argparse.Namespace) -> int:
     stop_event = threading.Event()
     redraw_event = threading.Event()
     load_history: collections.deque[float | None] = collections.deque(maxlen=24)
-    gpu_history: collections.deque[float | None] = collections.deque(maxlen=24)
+    gpu_history: dict[int, collections.deque[float | None]] = {}
+    gpu_memory_history: dict[int, collections.deque[float | None]] = {}
     previous_seen_events: set[str] = set()
     history_events: collections.deque[RecentEvent] = collections.deque(maxlen=max(args.history_limit, 0) or 1)
 
@@ -1144,13 +1209,27 @@ def run_live(args: argparse.Namespace) -> int:
                     )
                 if system is not None:
                     load_history.append(system.load_percent)
-                    gpu_history.append(
-                        (
-                            sum(gpu.utilization_gpu for gpu in system.gpu_stats) / len(system.gpu_stats)
-                            if system.gpu_stats
-                            else None
+                    active_gpu_ids = set()
+                    for gpu in system.gpu_stats:
+                        active_gpu_ids.add(gpu.index)
+                        if gpu.index not in gpu_history:
+                            gpu_history[gpu.index] = collections.deque(maxlen=24)
+                        if gpu.index not in gpu_memory_history:
+                            gpu_memory_history[gpu.index] = collections.deque(maxlen=24)
+                        gpu_history[gpu.index].append(gpu.utilization_gpu)
+                        gpu_memory_history[gpu.index].append(
+                            (
+                                ((gpu.memory_used_mb or 0.0) / gpu.memory_total_mb) * 100.0
+                                if gpu.memory_total_mb
+                                else None
+                            )
                         )
-                    )
+                    for gpu_index in list(gpu_history):
+                        if gpu_index not in active_gpu_ids:
+                            gpu_history[gpu_index].append(None)
+                    for gpu_index in list(gpu_memory_history):
+                        if gpu_index not in active_gpu_ids:
+                            gpu_memory_history[gpu_index].append(None)
                 operations = [
                     Operation(
                         session_id=item["session_id"],
@@ -1207,6 +1286,7 @@ def run_live(args: argparse.Namespace) -> int:
                         system=system,
                         load_history=load_history,
                         gpu_history=gpu_history,
+                        gpu_memory_history=gpu_memory_history,
                         active_count=data.get("active_count"),
                         idle_count=data.get("idle_count"),
                     )

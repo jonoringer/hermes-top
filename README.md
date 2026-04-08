@@ -25,6 +25,7 @@ Because it is reading Hermes state rather than sampling kernel metrics, the `res
 If you later want exact CPU/GPU telemetry, Hermes itself will need to emit that into its own state or expose a dedicated runtime endpoint. This first version is designed to be a safe Hermes-only monitor.
 
 When `nvidia-smi` is available, `hermes-top` also shows current utilization for every NVIDIA GPU plus compact load history graphs for host load and GPU load over time.
+The live dashboard uses ASCII section borders and ANSI colors when the terminal supports them.
 
 ## Installation
 
@@ -148,8 +149,9 @@ hermes-top --json
 ## System metrics
 
 - `host load`: current 1m, 5m, and 15m system load averages plus normalized 1m load as a percent of CPU cores
-- `gpu load`: current average NVIDIA GPU utilization plus one line per GPU with utilization, memory, and temperature when available
-- `load hist` and `gpu hist`: compact sparkline-style graphs showing recent host load and average GPU load samples in live mode
+- `gpu load`: current per-GPU NVIDIA utilization plus one line per GPU with utilization, memory, and temperature when available
+- `load hist`: compact sparkline-style graph showing recent host load samples in live mode
+- `util hist` and `mem hist`: per-GPU history graphs for utilization and memory pressure over time
 
 ## Recent events
 
