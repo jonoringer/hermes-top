@@ -9,6 +9,7 @@ import signal
 import sqlite3
 import sys
 import threading
+from importlib.metadata import PackageNotFoundError, version as package_version
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,11 +84,19 @@ def default_db_path() -> Path:
     return Path.home() / ".hermes" / "state.db"
 
 
+def installed_version() -> str:
+    try:
+        return package_version("hermes-top")
+    except PackageNotFoundError:
+        return "0.0.0+local"
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="hermes-top",
         description="Top-style monitor for Hermes Agent sessions and in-flight tool activity.",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {installed_version()}")
     parser.add_argument("--db-path", default=str(default_db_path()), help="Path to Hermes state.db")
     parser.add_argument("--limit", type=int, default=25, help="Maximum rows to display")
     parser.add_argument("--refresh", type=float, default=2.0, help="Refresh interval in seconds")
