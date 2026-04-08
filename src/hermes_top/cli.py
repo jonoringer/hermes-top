@@ -260,6 +260,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--db-path", default=str(default_db_path()), help="Path to Hermes state.db")
     parser.add_argument("--limit", type=int, default=25, help="Maximum rows to display")
     parser.add_argument("--refresh", type=float, default=2.0, help="Refresh interval in seconds")
+    parser.add_argument("--active-now-limit", type=int, default=6, help="Rows to show in the ACTIVE NOW section")
+    parser.add_argument("--changes-limit", type=int, default=8, help="Rows to show in the changes section")
+    parser.add_argument("--recent-events-limit", type=int, default=6, help="Rows to show in the recent events section")
+    parser.add_argument("--history-limit", type=int, default=10, help="Rows to keep in the history section")
     parser.add_argument(
         "--recent-window",
         type=float,
@@ -274,6 +278,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     parser.add_argument("--json", action="store_true", help="Emit a JSON snapshot instead of a live table")
     parser.add_argument("--once", action="store_true", help="Render one snapshot and exit")
+    parser.add_argument("--hide-system", action="store_true", help="Hide the system metrics section")
+    parser.add_argument("--hide-active-now", action="store_true", help="Hide the ACTIVE NOW section")
+    parser.add_argument("--hide-changes", action="store_true", help="Hide the changes section")
+    parser.add_argument("--hide-recent-events", action="store_true", help="Hide the recent events section")
+    parser.add_argument("--hide-history", action="store_true", help="Hide the history section")
     parser.set_defaults(include_idle=True)
     parser.add_argument(
         "--active-only",
@@ -772,8 +781,18 @@ def render_table(
     include_idle: bool,
     limit: int,
     hidden_idle_count: int = 0,
+    active_now_limit: int = 6,
+    changes_limit: int = 8,
+    recent_events_limit: int = 6,
+    history_limit: int = 10,
+    show_system: bool = True,
+    show_active_now: bool = True,
+    show_changes: bool = True,
+    show_recent_events: bool = True,
+    show_history: bool = True,
     active_now: list[RecentEvent] | None = None,
     change_feed: list[RecentEvent] | None = None,
+    history_events: list[RecentEvent] | None = None,
     recent_events: list[RecentEvent] | None = None,
     system: SystemSnapshot | None = None,
     load_history: collections.deque[float | None] | None = None,
@@ -807,7 +826,7 @@ def render_table(
         ),
         "",
     ]
-    if system is not None:
+    if show_system and system is not None:
         load_line = (
             "host load  "
             f"1m={format_load(system.load_1m)}  "
@@ -840,25 +859,33 @@ def render_table(
         else:
             lines.append("gpu load   no NVIDIA GPUs detected")
         lines.append("")
-    if active_now:
-        lines.append(f"active now ({len(active_now)})")
-        for event in active_now[:6]:
+    if show_active_now and active_now:
+        lines.append(f"active now ({min(len(active_now), max(active_now_limit, 0))})")
+        for event in active_now[: max(active_now_limit, 0)]:
             age = human_duration(event.age_seconds)
             lines.append(
                 f"  {age:>8}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 42))}"
             )
         lines.append("")
-    if change_feed:
+    if show_changes and change_feed:
         lines.append("changes")
-        for event in change_feed[:8]:
+        for event in change_feed[: max(changes_limit, 0)]:
             age = human_duration(event.age_seconds)
             lines.append(
                 f"  + {age:>6}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 44))}"
             )
         lines.append("")
-    if recent_events:
+    if show_history and history_events:
+        lines.append("history")
+        for event in history_events[: max(history_limit, 0)]:
+            age = human_duration(event.age_seconds)
+            lines.append(
+                f"  {age:>8}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 42))}"
+            )
+        lines.append("")
+    if show_recent_events and recent_events:
         lines.append("recent events")
-        for event in recent_events[:6]:
+        for event in recent_events[: max(recent_events_limit, 0)]:
             age = human_duration(event.age_seconds)
             lines.append(
                 f"  {age:>8}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 42))}"
@@ -1025,7 +1052,17 @@ def run_once(args: argparse.Namespace) -> int:
             args.include_idle,
             args.limit,
             hidden_idle_count=data.get("hidden_idle_count", 0),
+            active_now_limit=args.active_now_limit,
+            changes_limit=args.changes_limit,
+            recent_events_limit=args.recent_events_limit,
+            history_limit=args.history_limit,
+            show_system=not args.hide_system,
+            show_active_now=not args.hide_active_now,
+            show_changes=not args.hide_changes,
+            show_recent_events=not args.hide_recent_events,
+            show_history=not args.hide_history,
             active_now=active_now,
+            history_events=recent_events[: max(args.history_limit, 0)],
             recent_events=recent_events,
             system=system,
             load_history=collections.deque([system.load_percent] if system else [], maxlen=24),
@@ -1051,6 +1088,7 @@ def run_live(args: argparse.Namespace) -> int:
     load_history: collections.deque[float | None] = collections.deque(maxlen=24)
     gpu_history: collections.deque[float | None] = collections.deque(maxlen=24)
     previous_seen_events: set[str] = set()
+    history_events: collections.deque[RecentEvent] = collections.deque(maxlen=max(args.history_limit, 0) or 1)
 
     def handle_signal(_signum: int, _frame: Any) -> None:
         stop_event.set()
@@ -1138,6 +1176,8 @@ def run_live(args: argparse.Namespace) -> int:
                 ]
                 active_now = [event for event in recent_events if event.age_seconds <= max(args.recent_window, 0.0)]
                 change_feed, previous_seen_events = build_change_feed(recent_events, previous_seen_events)
+                for event in reversed(change_feed):
+                    history_events.appendleft(event)
                 sys.stdout.write(
                     render_table(
                         db_path,
@@ -1145,8 +1185,18 @@ def run_live(args: argparse.Namespace) -> int:
                         args.include_idle,
                         args.limit,
                         hidden_idle_count=data.get("hidden_idle_count", 0),
+                        active_now_limit=args.active_now_limit,
+                        changes_limit=args.changes_limit,
+                        recent_events_limit=args.recent_events_limit,
+                        history_limit=args.history_limit,
+                        show_system=not args.hide_system,
+                        show_active_now=not args.hide_active_now,
+                        show_changes=not args.hide_changes,
+                        show_recent_events=not args.hide_recent_events,
+                        show_history=not args.hide_history,
                         active_now=active_now,
                         change_feed=change_feed,
+                        history_events=list(history_events),
                         recent_events=recent_events,
                         system=system,
                         load_history=load_history,

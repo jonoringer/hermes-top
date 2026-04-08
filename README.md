@@ -75,6 +75,18 @@ Tune how fresh activity must be to appear in the `ACTIVE NOW` pane:
 hermes-top --recent-window 120
 ```
 
+Tune section sizes:
+
+```bash
+hermes-top --active-now-limit 8 --changes-limit 12 --history-limit 10 --recent-events-limit 8
+```
+
+Hide sections you do not want:
+
+```bash
+hermes-top --hide-system --hide-recent-events
+```
+
 JSON output:
 
 ```bash
@@ -144,6 +156,7 @@ hermes-top --json
 - `recent events`: a compact feed of the latest Hermes messages across sessions so new activity is visible even before the session table meaningfully reorders
 - `active now`: only the events inside the recent activity window, intended to feel like a live pulse
 - `changes`: newly observed Hermes events since the last refresh, so the screen shows what changed frame-to-frame
+- `history`: a scrolling memory of the last observed change events, so activity does not disappear as quickly as the `changes` pane
 
 ## Next step for deeper integration
 
