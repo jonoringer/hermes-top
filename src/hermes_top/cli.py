@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import re
 import shutil
 import signal
 import sqlite3
+import subprocess
 import sys
 import threading
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -29,6 +31,7 @@ CPU_PATTERN = re.compile(
     re.IGNORECASE,
 )
 WEB_PATTERN = re.compile(r"\b(http|https|url|fetch|request|response|api)\b", re.IGNORECASE)
+SPARK_CHARS = " .:-=+*#%@"
 
 
 @dataclass
@@ -77,6 +80,48 @@ class Operation:
         }
 
 
+@dataclass
+class GpuStat:
+    index: int
+    name: str
+    utilization_gpu: float
+    memory_used_mb: float | None = None
+    memory_total_mb: float | None = None
+    temperature_c: float | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "index": self.index,
+            "name": self.name,
+            "utilization_gpu": self.utilization_gpu,
+            "memory_used_mb": self.memory_used_mb,
+            "memory_total_mb": self.memory_total_mb,
+            "temperature_c": self.temperature_c,
+        }
+
+
+@dataclass
+class SystemSnapshot:
+    cpu_count: int | None
+    load_1m: float | None
+    load_5m: float | None
+    load_15m: float | None
+    load_percent: float | None
+    gpu_stats: list[GpuStat]
+    gpu_query_error: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "cpu_count": self.cpu_count,
+            "load_1m": self.load_1m,
+            "load_5m": self.load_5m,
+            "load_15m": self.load_15m,
+            "load_percent": self.load_percent,
+            "gpu_stats": [gpu.as_dict() for gpu in self.gpu_stats],
+            "gpu_query_error": self.gpu_query_error,
+        }
+
+
 def default_db_path() -> Path:
     hermes_home = os.environ.get("HERMES_HOME")
     if hermes_home:
@@ -89,6 +134,101 @@ def installed_version() -> str:
         return package_version("hermes-top")
     except PackageNotFoundError:
         return "0.0.0+local"
+
+
+def safe_float(value: str) -> float | None:
+    text = (value or "").strip()
+    if not text or text in {"[N/A]", "N/A", "na"}:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def collect_system_snapshot() -> SystemSnapshot:
+    cpu_count = os.cpu_count()
+    load_1m: float | None = None
+    load_5m: float | None = None
+    load_15m: float | None = None
+    load_percent: float | None = None
+    try:
+        load_1m, load_5m, load_15m = os.getloadavg()
+        if cpu_count and cpu_count > 0:
+            load_percent = min(max((load_1m / cpu_count) * 100.0, 0.0), 999.0)
+    except (AttributeError, OSError):
+        pass
+
+    gpu_stats: list[GpuStat] = []
+    gpu_query_error: str | None = None
+    if shutil.which("nvidia-smi"):
+        try:
+            proc = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=index,name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+                check=False,
+            )
+            if proc.returncode == 0:
+                for line in proc.stdout.splitlines():
+                    parts = [part.strip() for part in line.split(",")]
+                    if len(parts) < 6:
+                        continue
+                    index = int(parts[0]) if parts[0].isdigit() else len(gpu_stats)
+                    gpu_stats.append(
+                        GpuStat(
+                            index=index,
+                            name=parts[1],
+                            utilization_gpu=safe_float(parts[2]) or 0.0,
+                            memory_used_mb=safe_float(parts[3]),
+                            memory_total_mb=safe_float(parts[4]),
+                            temperature_c=safe_float(parts[5]),
+                        )
+                    )
+            else:
+                gpu_query_error = (proc.stderr or proc.stdout or "nvidia-smi failed").strip()
+        except (OSError, subprocess.SubprocessError) as exc:
+            gpu_query_error = str(exc)
+
+    return SystemSnapshot(
+        cpu_count=cpu_count,
+        load_1m=load_1m,
+        load_5m=load_5m,
+        load_15m=load_15m,
+        load_percent=load_percent,
+        gpu_stats=gpu_stats,
+        gpu_query_error=gpu_query_error,
+    )
+
+
+def build_sparkline(values: Iterable[float | None], width: int = 20, max_value: float = 100.0) -> str:
+    points = [value for value in values if value is not None]
+    if not points:
+        return " " * width
+    clipped = list(points)[-width:]
+    spark = []
+    for value in clipped:
+        ratio = 0.0 if max_value <= 0 else max(min(value / max_value, 1.0), 0.0)
+        index = int(round(ratio * (len(SPARK_CHARS) - 1)))
+        spark.append(SPARK_CHARS[index])
+    return "".join(spark).rjust(width)
+
+
+def format_percent(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.0f}%"
+
+
+def format_load(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.2f}"
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -555,6 +695,9 @@ def render_table(
     operations: list[Operation],
     include_idle: bool,
     limit: int,
+    system: SystemSnapshot | None = None,
+    load_history: collections.deque[float | None] | None = None,
+    gpu_history: collections.deque[float | None] | None = None,
     active_count: int | None = None,
     idle_count: int | None = None,
 ) -> str:
@@ -583,9 +726,46 @@ def render_table(
             f"  active={active_count}  idle={idle_count}"
         ),
         "",
-        header,
-        "-" * min(len(header) + detail_width + 1, terminal_width),
     ]
+    if system is not None:
+        load_line = (
+            "host load  "
+            f"1m={format_load(system.load_1m)}  "
+            f"5m={format_load(system.load_5m)}  "
+            f"15m={format_load(system.load_15m)}  "
+            f"cpu-load={format_percent(system.load_percent)}"
+        )
+        if system.cpu_count:
+            load_line += f"  cores={system.cpu_count}"
+        lines.append(load_line)
+        if load_history is not None:
+            lines.append(f"load hist  {build_sparkline(load_history, width=24)}")
+        if system.gpu_stats:
+            avg_gpu = sum(gpu.utilization_gpu for gpu in system.gpu_stats) / len(system.gpu_stats)
+            lines.append(
+                f"gpu load   avg={format_percent(avg_gpu)}  count={len(system.gpu_stats)}"
+            )
+            if gpu_history is not None:
+                lines.append(f"gpu hist   {build_sparkline(gpu_history, width=24)}")
+            for gpu in system.gpu_stats:
+                mem = ""
+                if gpu.memory_used_mb is not None and gpu.memory_total_mb is not None:
+                    mem = f" mem={gpu.memory_used_mb:.0f}/{gpu.memory_total_mb:.0f}MiB"
+                temp = f" temp={gpu.temperature_c:.0f}C" if gpu.temperature_c is not None else ""
+                lines.append(
+                    f"gpu{gpu.index:<2} {clip(gpu.name, 24):<24} util={format_percent(gpu.utilization_gpu):>4}{mem}{temp}"
+                )
+        elif system.gpu_query_error:
+            lines.append(f"gpu load   unavailable ({summarize_text(system.gpu_query_error, limit=60)})")
+        else:
+            lines.append("gpu load   no NVIDIA GPUs detected")
+        lines.append("")
+    lines.extend(
+        [
+            header,
+            "-" * min(len(header) + detail_width + 1, terminal_width),
+        ]
+    )
     if not rows:
         if idle_count:
             noun = "session" if idle_count == 1 else "sessions"
@@ -631,6 +811,7 @@ def snapshot(db_path: Path, include_idle: bool) -> dict[str, Any]:
         "operation_count": len(operations),
         "active_count": active_count,
         "idle_count": idle_count,
+        "system": collect_system_snapshot().as_dict(),
         "operations": [op.as_dict() for op in operations],
     }
 
@@ -665,12 +846,47 @@ def run_once(args: argparse.Namespace) -> int:
         )
         for item in data["operations"]
     ]
+    system = None
+    if isinstance(data.get("system"), dict):
+        system_dict = data["system"]
+        system = SystemSnapshot(
+            cpu_count=system_dict.get("cpu_count"),
+            load_1m=system_dict.get("load_1m"),
+            load_5m=system_dict.get("load_5m"),
+            load_15m=system_dict.get("load_15m"),
+            load_percent=system_dict.get("load_percent"),
+            gpu_stats=[
+                GpuStat(
+                    index=gpu.get("index", idx),
+                    name=gpu.get("name", f"GPU {idx}"),
+                    utilization_gpu=gpu.get("utilization_gpu", 0.0),
+                    memory_used_mb=gpu.get("memory_used_mb"),
+                    memory_total_mb=gpu.get("memory_total_mb"),
+                    temperature_c=gpu.get("temperature_c"),
+                )
+                for idx, gpu in enumerate(system_dict.get("gpu_stats", []))
+                if isinstance(gpu, dict)
+            ],
+            gpu_query_error=system_dict.get("gpu_query_error"),
+        )
     print(
         render_table(
             db_path,
             operations,
             args.include_idle,
             args.limit,
+            system=system,
+            load_history=collections.deque([system.load_percent] if system else [], maxlen=24),
+            gpu_history=collections.deque(
+                [
+                    (
+                        sum(gpu.utilization_gpu for gpu in system.gpu_stats) / len(system.gpu_stats)
+                        if system and system.gpu_stats
+                        else None
+                    )
+                ],
+                maxlen=24,
+            ),
             active_count=data.get("active_count"),
             idle_count=data.get("idle_count"),
         )
@@ -680,6 +896,8 @@ def run_once(args: argparse.Namespace) -> int:
 
 def run_live(args: argparse.Namespace) -> int:
     stop_event = threading.Event()
+    load_history: collections.deque[float | None] = collections.deque(maxlen=24)
+    gpu_history: collections.deque[float | None] = collections.deque(maxlen=24)
 
     def handle_signal(_signum: int, _frame: Any) -> None:
         stop_event.set()
@@ -699,6 +917,38 @@ def run_live(args: argparse.Namespace) -> int:
             if not data["exists"]:
                 sys.stdout.write(f"hermes-top  db={db_path}\n\n{data['warning']}\n")
             else:
+                system = None
+                if isinstance(data.get("system"), dict):
+                    system_dict = data["system"]
+                    system = SystemSnapshot(
+                        cpu_count=system_dict.get("cpu_count"),
+                        load_1m=system_dict.get("load_1m"),
+                        load_5m=system_dict.get("load_5m"),
+                        load_15m=system_dict.get("load_15m"),
+                        load_percent=system_dict.get("load_percent"),
+                        gpu_stats=[
+                            GpuStat(
+                                index=gpu.get("index", idx),
+                                name=gpu.get("name", f"GPU {idx}"),
+                                utilization_gpu=gpu.get("utilization_gpu", 0.0),
+                                memory_used_mb=gpu.get("memory_used_mb"),
+                                memory_total_mb=gpu.get("memory_total_mb"),
+                                temperature_c=gpu.get("temperature_c"),
+                            )
+                            for idx, gpu in enumerate(system_dict.get("gpu_stats", []))
+                            if isinstance(gpu, dict)
+                        ],
+                        gpu_query_error=system_dict.get("gpu_query_error"),
+                    )
+                if system is not None:
+                    load_history.append(system.load_percent)
+                    gpu_history.append(
+                        (
+                            sum(gpu.utilization_gpu for gpu in system.gpu_stats) / len(system.gpu_stats)
+                            if system.gpu_stats
+                            else None
+                        )
+                    )
                 operations = [
                     Operation(
                         session_id=item["session_id"],
@@ -722,6 +972,9 @@ def run_live(args: argparse.Namespace) -> int:
                         operations,
                         args.include_idle,
                         args.limit,
+                        system=system,
+                        load_history=load_history,
+                        gpu_history=gpu_history,
                         active_count=data.get("active_count"),
                         idle_count=data.get("idle_count"),
                     )

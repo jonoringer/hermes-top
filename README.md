@@ -1,6 +1,6 @@
 # hermes-top
 
-`hermes-top` is a small, top-style CLI for watching Hermes Agent activity from Hermes' own persisted state instead of the host OS process table.
+`hermes-top` is a small, top-style CLI for watching Hermes Agent activity from Hermes' own persisted state, alongside machine load and GPU utilization.
 
 It reads Hermes session metadata from `~/.hermes/state.db` and infers active Hermes-owned work by looking for:
 
@@ -23,6 +23,8 @@ Because it is reading Hermes state rather than sampling kernel metrics, the `res
 - `gpu-likely` is inferred from command/tool text like `cuda`, `torch`, `vllm`, or similar markers
 
 If you later want exact CPU/GPU telemetry, Hermes itself will need to emit that into its own state or expose a dedicated runtime endpoint. This first version is designed to be a safe Hermes-only monitor.
+
+When `nvidia-smi` is available, `hermes-top` also shows current utilization for every NVIDIA GPU plus compact load history graphs for host load and GPU load over time.
 
 ## Installation
 
@@ -110,6 +112,12 @@ hermes-top --json
 - `RESOURCE`: Hermes-derived hint such as `network`, `cpu-likely`, or `gpu-likely`
 - `SESSION`: Hermes session title
 - `DETAIL`: compact argument or job detail summary
+
+## System metrics
+
+- `host load`: current 1m, 5m, and 15m system load averages plus normalized 1m load as a percent of CPU cores
+- `gpu load`: current average NVIDIA GPU utilization plus one line per GPU with utilization, memory, and temperature when available
+- `load hist` and `gpu hist`: compact sparkline-style graphs showing recent host load and average GPU load samples in live mode
 
 ## Next step for deeper integration
 
