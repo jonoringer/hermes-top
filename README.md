@@ -133,6 +133,10 @@ hermes-top --json
 - `gpu load`: current average NVIDIA GPU utilization plus one line per GPU with utilization, memory, and temperature when available
 - `load hist` and `gpu hist`: compact sparkline-style graphs showing recent host load and average GPU load samples in live mode
 
+## Recent events
+
+- `recent events`: a compact feed of the latest Hermes messages across sessions so new activity is visible even before the session table meaningfully reorders
+
 ## Next step for deeper integration
 
 If you want `hermes-top` to become exact instead of heuristic, the best upstream change in Hermes would be:

@@ -122,6 +122,24 @@ class SystemSnapshot:
         }
 
 
+@dataclass
+class RecentEvent:
+    age_seconds: float
+    source: str
+    session_title: str
+    role: str
+    detail: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "age_seconds": round(self.age_seconds, 3),
+            "source": self.source,
+            "session_title": self.session_title,
+            "role": self.role,
+            "detail": self.detail,
+        }
+
+
 def default_db_path() -> Path:
     hermes_home = os.environ.get("HERMES_HOME")
     if hermes_home:
@@ -514,6 +532,33 @@ def describe_message(row: sqlite3.Row) -> str:
     return f"{role}: {detail}" if detail else role
 
 
+def build_recent_events(
+    sessions: dict[str, SessionInfo],
+    messages: Iterable[sqlite3.Row],
+    limit: int = 6,
+) -> list[RecentEvent]:
+    now = datetime.now(timezone.utc)
+    events: list[RecentEvent] = []
+    for row in messages:
+        session = sessions.get(str(row["session_id"]))
+        if not session:
+            continue
+        created_at = parse_time(row["created_at"]) or parse_time(session.updated_at) or parse_time(session.started_at)
+        if created_at is None:
+            continue
+        events.append(
+            RecentEvent(
+                age_seconds=max((now - created_at).total_seconds(), 0.0),
+                source=session.source,
+                session_title=session.title,
+                role=str(row["role"] or "message"),
+                detail=describe_message(row),
+            )
+        )
+    events.sort(key=lambda event: event.age_seconds)
+    return events[:limit]
+
+
 def classify_tool(tool_name: str, detail: str) -> tuple[str, str]:
     name = (tool_name or "").lower()
     combined = f"{tool_name} {detail}"
@@ -707,6 +752,7 @@ def render_table(
     include_idle: bool,
     limit: int,
     hidden_idle_count: int = 0,
+    recent_events: list[RecentEvent] | None = None,
     system: SystemSnapshot | None = None,
     load_history: collections.deque[float | None] | None = None,
     gpu_history: collections.deque[float | None] | None = None,
@@ -772,6 +818,14 @@ def render_table(
         else:
             lines.append("gpu load   no NVIDIA GPUs detected")
         lines.append("")
+    if recent_events:
+        lines.append("recent events")
+        for event in recent_events[:6]:
+            age = human_duration(event.age_seconds)
+            lines.append(
+                f"  {age:>8}  {clip(event.source, 8):<8}  {clip(event.session_title, 16):<16}  {clip(event.detail, max(24, terminal_width - 42))}"
+            )
+        lines.append("")
     lines.extend(
         [
             header,
@@ -822,7 +876,9 @@ def snapshot(db_path: Path, include_idle: bool, all_sessions: bool, max_idle_age
 
     with connect_db(db_path) as conn:
         sessions = read_sessions(conn)
-        operations = build_operations(sessions, read_messages(conn))
+        messages = read_messages(conn)
+        operations = build_operations(sessions, messages)
+        recent_events = build_recent_events(sessions, messages)
 
     active_count = sum(1 for op in operations if op.status not in {"idle", "recent"})
     idle_count = sum(1 for op in operations if op.status in {"idle", "recent"})
@@ -848,6 +904,7 @@ def snapshot(db_path: Path, include_idle: bool, all_sessions: bool, max_idle_age
         "idle_count": idle_count,
         "hidden_idle_count": hidden_idle_count,
         "system": collect_system_snapshot().as_dict(),
+        "recent_events": [event.as_dict() for event in recent_events],
         "operations": [op.as_dict() for op in operations],
     }
 
@@ -888,6 +945,17 @@ def run_once(args: argparse.Namespace) -> int:
         for item in data["operations"]
     ]
     system = None
+    recent_events = [
+        RecentEvent(
+            age_seconds=item.get("age_seconds", 0.0),
+            source=item.get("source", "unknown"),
+            session_title=item.get("session_title", "—"),
+            role=item.get("role", "message"),
+            detail=item.get("detail", ""),
+        )
+        for item in data.get("recent_events", [])
+        if isinstance(item, dict)
+    ]
     if isinstance(data.get("system"), dict):
         system_dict = data["system"]
         system = SystemSnapshot(
@@ -917,6 +985,7 @@ def run_once(args: argparse.Namespace) -> int:
             args.include_idle,
             args.limit,
             hidden_idle_count=data.get("hidden_idle_count", 0),
+            recent_events=recent_events,
             system=system,
             load_history=collections.deque([system.load_percent] if system else [], maxlen=24),
             gpu_history=collections.deque(
@@ -1013,6 +1082,17 @@ def run_live(args: argparse.Namespace) -> int:
                     )
                     for item in data["operations"]
                 ]
+                recent_events = [
+                    RecentEvent(
+                        age_seconds=item.get("age_seconds", 0.0),
+                        source=item.get("source", "unknown"),
+                        session_title=item.get("session_title", "—"),
+                        role=item.get("role", "message"),
+                        detail=item.get("detail", ""),
+                    )
+                    for item in data.get("recent_events", [])
+                    if isinstance(item, dict)
+                ]
                 sys.stdout.write(
                     render_table(
                         db_path,
@@ -1020,6 +1100,7 @@ def run_live(args: argparse.Namespace) -> int:
                         args.include_idle,
                         args.limit,
                         hidden_idle_count=data.get("hidden_idle_count", 0),
+                        recent_events=recent_events,
                         system=system,
                         load_history=load_history,
                         gpu_history=gpu_history,
