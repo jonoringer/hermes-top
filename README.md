@@ -32,10 +32,12 @@ Install with `pipx` if you want an isolated CLI without managing a virtualenv:
 pipx install git+https://github.com/jonoringer/hermes-top.git
 ```
 
-Install for your user without a virtualenv:
+On Ubuntu/Debian systems, this is the recommended path because plain `pip install --user` may be blocked by the distro's externally-managed Python rules.
+
+If you explicitly want a user-level install outside `pipx`, use:
 
 ```bash
-python3 -m pip install --user git+https://github.com/jonoringer/hermes-top.git
+python3 -m pip install --user --break-system-packages git+https://github.com/jonoringer/hermes-top.git
 ```
 
 Install from a local checkout:
