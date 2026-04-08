@@ -8,6 +8,10 @@ It reads Hermes session metadata from `~/.hermes/state.db` and infers active Her
 - long-running background terminal/process jobs surfaced in Hermes tool results
 - open Hermes sessions with no current in-flight tool call, if you opt into idle rows
 
+## Screenshot
+
+![hermes-top dashboard](docs/dashboard.png)
+
 ## Why this approach
 
 This monitor stays Hermes-scoped:
